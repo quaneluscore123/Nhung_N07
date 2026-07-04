@@ -82,6 +82,29 @@ function sendToESP32(macAddress, event, data) {
   return false;
 }
 
+async function autoLinkDevice(macAddress) {
+  let device = await Device.findOne({ macAddress });
+  if (device) return device;
+
+  const dummyDevice = await Device.findOne({ macAddress: 'AA:BB:CC:DD:EE:FF' });
+  if (dummyDevice) {
+    dummyDevice.macAddress = macAddress;
+    await dummyDevice.save();
+    console.log(`[AUTO-LINK] Đã gán MAC thật ${macAddress} cho trạm thiết bị mẫu`);
+    return dummyDevice;
+  }
+
+  const anyDevice = await Device.findOne();
+  if (anyDevice) {
+    anyDevice.macAddress = macAddress;
+    await anyDevice.save();
+    console.log(`[AUTO-LINK] Đã gán MAC thật ${macAddress} cho thiết bị ${anyDevice.name}`);
+    return anyDevice;
+  }
+
+  return null;
+}
+
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, phone, password } = req.body;
@@ -140,6 +163,18 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) {
     console.error('[Login Error]', err);
     res.status(500).json({ error: 'Lỗi server' });
+  }
+});
+
+app.get('/api/auth/me', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('-password');
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    res.json({ user });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
   }
 });
 
@@ -406,9 +441,9 @@ app.post('/api/locker/verify-delivery', async (req, res) => {
   try {
     const { code, macAddress: mac } = req.body;
     const macAddress = mac || 'AA:BB:CC:DD:EE:FF';
-    console.log(`[ESP32] Nhận yêu cầu giao hàng với mã: ${code}`);
+    console.log(`[ESP32] Nhận yêu cầu giao hàng với mã: ${code}, MAC: ${macAddress}`);
 
-    const device = await Device.findOne({ macAddress });
+    const device = await autoLinkDevice(macAddress);
     if (!device) {
       return res.status(400).json({ success: false, message: 'Invalid device' });
     }
@@ -463,7 +498,7 @@ app.post('/api/locker/verify-pickup', async (req, res) => {
 
     let query = { otpCode: code, status: 'delivered' };
     if (mac) {
-      const device = await Device.findOne({ macAddress: mac });
+      const device = await autoLinkDevice(mac);
       if (!device) return res.status(400).json({ success: false, message: 'Invalid device' });
       query.deviceId = device._id;
     }
@@ -543,6 +578,7 @@ io.on('connection', (socket) => {
     const { macAddress } = data;
     if (macAddress) {
       espDevices.set(macAddress, socket.id);
+      await autoLinkDevice(macAddress);
       await Device.updateOne({ macAddress }, { isOnline: true });
       console.log(`[WS] ESP32 registered: ${macAddress}`);
       socket.emit('registered', { success: true });

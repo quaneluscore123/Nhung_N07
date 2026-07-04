@@ -77,13 +77,13 @@ async function seedData() {
       await Cabinet.create({
         deviceId: device._id,
         cabinetName: 'Ngăn 1',
-        cabinetPin: 13,
+        cabinetPin: 12,
       });
 
       await Cabinet.create({
         deviceId: device._id,
         cabinetName: 'Ngăn 2',
-        cabinetPin: 12,
+        cabinetPin: 13,
       });
 
       console.log('✅ [DB] Đã khởi tạo 1 trạm thiết bị mẫu với 2 ngăn tủ');

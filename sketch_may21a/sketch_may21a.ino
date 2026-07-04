@@ -17,10 +17,14 @@
 #define OLED_SCL 22 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-const char* ssid = "realme C85 p5if";
-const char* password = "88888888";
-const String SERVER_URL = "http://10.212.238.220:3000"; 
-const char* WS_HOST = "10.212.238.220";
+// const char* ssid = "realme C85 p5if";
+// const char* password = "88888888";
+// const String SERVER_URL = "http://10.212.238.220:3000"; 
+// const char* WS_HOST = "10.212.238.220";
+const char* ssid = "PSG";
+const char* password = "123abc123";
+const String SERVER_URL = "http://192.168.100.92:3000"; 
+const char* WS_HOST = "192.168.100.92";
 const int WS_PORT = 3000;
 
 Servo servoBox1; 
@@ -29,7 +33,7 @@ const int servo1Pin = 13;
 const int servo2Pin = 12; 
 
 const int angleClosed = 10; 
-const int angleOpen = 100;  
+const int angleOpen = 130;  
 
 const byte ROWS = 4; 
 const byte COLS = 4; 
@@ -137,23 +141,32 @@ void displayMessage(String title, String msg, int delayTime = 2000) {
 
 void openBoxByPin(int pin) {
   displayMessage("MO TU", "DANG MO CUA...");
+  Serial.print("[SERVO] Dang mo pin: ");
+  Serial.println(pin);
   
   if (pin == servo1Pin) {
     servoBox1.attach(servo1Pin, 500, 2400); 
+    delay(100);
     servoBox1.write(angleOpen); 
     delay(5000); 
     displayMessage("DONG CUA", "DANG KHOA TU...");
     servoBox1.write(angleClosed); 
-    delay(1000); 
-    servoBox1.detach(); 
+    delay(1500); 
+    servoBox1.detach();
+    delay(100);
   } else if (pin == servo2Pin) {
     servoBox2.attach(servo2Pin, 500, 2400);
+    delay(100);
     servoBox2.write(angleOpen);
     delay(5000);
     displayMessage("DONG CUA", "DANG KHOA TU...");
     servoBox2.write(angleClosed);
-    delay(1000);
-    servoBox2.detach(); 
+    delay(1500);
+    servoBox2.detach();
+    delay(100);
+  } else {
+    Serial.print("[SERVO] Pin khong hop le: ");
+    Serial.println(pin);
   }
   
   currentState = STATE_IDLE; 
@@ -228,6 +241,11 @@ void verifyDelivery(String code) {
 }
 
 void verifyPickup(String code) {
+  if (WiFi.status() == WL_CONNECTED) {
+    verifyPickupOnline(code);
+    return;
+  }
+  
   for (int i = 0; i < syncDataCount; i++) {
     if (syncData[i].otpCode == code) {
       int pin = syncData[i].cabinetPin;
@@ -244,20 +262,15 @@ void verifyPickup(String code) {
       }
       
       openBoxByPin(pin);
-      
       syncLogsToServer();
       return;
     }
   }
   
-  if (WiFi.status() == WL_CONNECTED) {
-    verifyPickupOnline(code);
-  } else {
-    displayMessage("LOI", "MA KHONG HOP LE!");
-    delay(2000);
-    currentState = STATE_IDLE;
-    displayMainMenu();
-  }
+  displayMessage("LOI", "MA KHONG HOP LE!");
+  delay(2000);
+  currentState = STATE_IDLE;
+  displayMainMenu();
 }
 
 void verifyPickupOnline(String code) {
@@ -440,6 +453,30 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
 void setup() {
   Serial.begin(115200);
+  
+  pinMode(servo1Pin, OUTPUT);
+  pinMode(servo2Pin, OUTPUT);
+  digitalWrite(servo1Pin, LOW);
+  digitalWrite(servo2Pin, LOW);
+  
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  servoBox1.setPeriodHertz(50); 
+  servoBox2.setPeriodHertz(50);
+  
+  servoBox1.attach(servo1Pin, 500, 2400); 
+  servoBox1.write(angleClosed);
+  delay(1000);
+  servoBox1.detach();
+  delay(200);
+
+  servoBox2.attach(servo2Pin, 500, 2400);
+  servoBox2.write(angleClosed);
+  delay(1000);
+  servoBox2.detach();
+  delay(200);
+
+  // Khởi tạo OLED
   Wire.begin(OLED_SDA, OLED_SCL);
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
@@ -459,7 +496,7 @@ void setup() {
   }
   
   macAddress = WiFi.macAddress();
-  macAddress.replace(":", "");
+  macAddress.replace(":", "");  
   String formattedMac = "";
   for (int i = 0; i < macAddress.length(); i++) {
     formattedMac += macAddress[i];
@@ -467,24 +504,9 @@ void setup() {
       formattedMac += ":";
     }
   }
-  macAddress = formattedMac;
+  macAddress = formattedMac; 
   Serial.print("MAC Address: ");
   Serial.println(macAddress);
-
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  servoBox1.setPeriodHertz(50); 
-  servoBox2.setPeriodHertz(50);
-  
-  servoBox1.attach(servo1Pin, 500, 2400); 
-  servoBox1.write(angleClosed);
-  delay(500);
-  servoBox1.detach();
-
-  servoBox2.attach(servo2Pin, 500, 2400);
-  servoBox2.write(angleClosed);
-  delay(500);
-  servoBox2.detach();
 
   if (WiFi.status() == WL_CONNECTED) {
     webSocket.begin(WS_HOST, WS_PORT, "/socket.io/?EIO=4&transport=websocket");

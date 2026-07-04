@@ -10,14 +10,28 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Khôi phục session từ localStorage
-    const savedToken = localStorage.getItem('token');
-    const savedUser = localStorage.getItem('user');
-    if (savedToken && savedUser) {
-      setToken(savedToken);
-      setUser(JSON.parse(savedUser));
-    }
-    setLoading(false);
+    // Khôi phục session từ localStorage + xác thực token với server
+    const validateSession = async () => {
+      const savedToken = localStorage.getItem('token');
+      const savedUser = localStorage.getItem('user');
+      if (savedToken && savedUser) {
+        try {
+          // Gọi API kiểm tra token còn hợp lệ không
+          const res = await axios.get(`${API_URL}/api/auth/me`, {
+            headers: { Authorization: `Bearer ${savedToken}` }
+          });
+          setToken(savedToken);
+          setUser(res.data.user);
+        } catch (err) {
+          // Token hết hạn hoặc server đã restart → xoá session cũ
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
+          console.log('[Auth] Session cũ không hợp lệ, yêu cầu đăng nhập lại');
+        }
+      }
+      setLoading(false);
+    };
+    validateSession();
   }, []);
 
   // Cấu hình axios header khi có token
