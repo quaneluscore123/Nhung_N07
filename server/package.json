@@ -1,18 +1,24 @@
 {
-  "name": "server",
+  "name": "smart-locker-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "Backend server for Smart Locker IoT System",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "sqlite3": "^6.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb-memory-server": "^11.2.0",
+    "mongoose": "^8.5.0",
+    "otp-generator": "^4.0.1",
+    "socket.io": "^4.8.3",
     "uuid": "^14.0.0"
   }
 }

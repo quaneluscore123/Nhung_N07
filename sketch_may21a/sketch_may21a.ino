@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <WebSocketsClient.h>
 
 #define SCREEN_WIDTH 128 
 #define SCREEN_HEIGHT 64 
@@ -16,22 +17,20 @@
 #define OLED_SCL 22 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// --- CẤU HÌNH WIFI & SERVER ---
-const char* ssid = "PSG";
-const char* password = "123abc123";
-// Thay đổi IP này thành IP IPv4 máy tính của bạn khi chạy backend (VD: 192.168.1.100)
-const String SERVER_URL = "http://192.168.100.92:3000"; 
+const char* ssid = "realme C85 p5if";
+const char* password = "88888888";
+const String SERVER_URL = "http://10.212.238.220:3000"; 
+const char* WS_HOST = "10.212.238.220";
+const int WS_PORT = 3000;
 
-// --- CẤU HÌNH SERVO ---
 Servo servoBox1; 
 Servo servoBox2; 
 const int servo1Pin = 13; 
-const int servo2Pin = 14; 
+const int servo2Pin = 12; 
 
 const int angleClosed = 10; 
 const int angleOpen = 100;  
 
-// --- CẤU HÌNH BÀN PHÍM KEYPAD 4x4 ---
 const byte ROWS = 4; 
 const byte COLS = 4; 
 char keys[ROWS][COLS] = {
@@ -46,7 +45,6 @@ byte colPins[COLS] = {5, 4, 26, 32};
 
 Keypad myKeypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// --- QUẢN LÝ TRẠNG THÁI ---
 enum SmartLockerState {
   STATE_IDLE,
   STATE_DELIVERY_INPUT,
@@ -56,9 +54,25 @@ enum SmartLockerState {
 SmartLockerState currentState = STATE_IDLE;
 String inputBuffer = ""; 
 
-// ==========================================
-// CÁC HÀM TRỢ GIÚP
-// ==========================================
+WebSocketsClient webSocket;
+bool wsConnected = false;
+
+#define MAX_SYNC_ENTRIES 10
+struct SyncEntry {
+  int cabinetPin;
+  String otpCode;
+};
+SyncEntry syncData[MAX_SYNC_ENTRIES];
+int syncDataCount = 0;
+
+#define MAX_LOG_QUEUE 10
+struct LogEntry {
+  int cabinetPin;
+};
+LogEntry logQueue[MAX_LOG_QUEUE];
+int logQueueCount = 0;
+
+String macAddress = "";
 
 void displayMainMenu() {
   display.clearDisplay();
@@ -76,7 +90,10 @@ void displayMainMenu() {
   
   if (WiFi.status() == WL_CONNECTED) {
     display.setCursor(0, 50);
-    display.println(F("WiFi: OK"));
+    display.print(F("WiFi: OK"));
+    if (wsConnected) {
+      display.print(F(" | WS: OK"));
+    }
   } else {
     display.setCursor(0, 50);
     display.println(F("WiFi: Khong ket noi!"));
@@ -118,26 +135,22 @@ void displayMessage(String title, String msg, int delayTime = 2000) {
   delay(delayTime);
 }
 
-// Hàm mở khóa CẢI TIẾN: Chống giật Servo
-void openBox(int boxNumber) {
-  if (boxNumber == 1) {
-    displayMessage("BOX 1", "DANG MO CUA...");
+void openBoxByPin(int pin) {
+  displayMessage("MO TU", "DANG MO CUA...");
+  
+  if (pin == servo1Pin) {
     servoBox1.attach(servo1Pin, 500, 2400); 
     servoBox1.write(angleOpen); 
     delay(5000); 
-    
-    displayMessage("DONG CUA", "DANG KHOA BOX 1...");
+    displayMessage("DONG CUA", "DANG KHOA TU...");
     servoBox1.write(angleClosed); 
     delay(1000); 
     servoBox1.detach(); 
-
-  } else if (boxNumber == 2) {
-    displayMessage("BOX 2", "DANG MO CUA...");
+  } else if (pin == servo2Pin) {
     servoBox2.attach(servo2Pin, 500, 2400);
     servoBox2.write(angleOpen);
     delay(5000);
-    
-    displayMessage("DONG CUA", "DANG KHOA BOX 2...");
+    displayMessage("DONG CUA", "DANG KHOA TU...");
     servoBox2.write(angleClosed);
     delay(1000);
     servoBox2.detach(); 
@@ -147,7 +160,15 @@ void openBox(int boxNumber) {
   displayMainMenu(); 
 }
 
-void verifyCode(String type, String code) {
+void openBox(int boxNumber) {
+  if (boxNumber == 1) {
+    openBoxByPin(servo1Pin);
+  } else if (boxNumber == 2) {
+    openBoxByPin(servo2Pin);
+  }
+}
+
+void verifyDelivery(String code) {
   if (WiFi.status() != WL_CONNECTED) {
     displayMessage("LOI MANG", "Khong co WiFi!");
     currentState = STATE_IDLE;
@@ -158,13 +179,13 @@ void verifyCode(String type, String code) {
   displayMessage("DANG XU LY", "Kiem tra ma tren Server...");
   
   HTTPClient http;
-  String url = (type == "delivery") ? (SERVER_URL + "/api/locker/verify-delivery") : (SERVER_URL + "/api/locker/verify-pickup");
+  String url = SERVER_URL + "/api/locker/verify-delivery";
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
 
-  // Tạo JSON payload
   StaticJsonDocument<200> doc;
   doc["code"] = code;
+  doc["macAddress"] = macAddress;
   String requestBody;
   serializeJson(doc, requestBody);
 
@@ -178,9 +199,18 @@ void verifyCode(String type, String code) {
     DeserializationError error = deserializeJson(responseDoc, response);
     
     if (!error && responseDoc["success"] == true) {
-      int boxToOpen = responseDoc["boxNumber"];
+      int cabinetPin = responseDoc["cabinetPin"] | 0;
+      int boxNumber = responseDoc["boxNumber"] | 0;
       displayMessage("THANH CONG", "Ma hop le!");
-      openBox(boxToOpen);
+      
+      if (cabinetPin > 0) {
+        openBoxByPin(cabinetPin);
+      } else if (boxNumber > 0) {
+        openBox(boxNumber);
+      }
+      
+      // Sau khi giao hàng, đồng bộ lại dữ liệu
+      syncDataFromServer();
     } else {
       displayMessage("LOI", "MA KHONG HOP LE!");
       delay(2000);
@@ -197,9 +227,216 @@ void verifyCode(String type, String code) {
   http.end();
 }
 
-// ==========================================
-// CÁC HÀM CHÍNH 
-// ==========================================
+void verifyPickup(String code) {
+  for (int i = 0; i < syncDataCount; i++) {
+    if (syncData[i].otpCode == code) {
+      int pin = syncData[i].cabinetPin;
+      displayMessage("THANH CONG", "Ma hop le! (Offline)");
+      
+      for (int j = i; j < syncDataCount - 1; j++) {
+        syncData[j] = syncData[j + 1];
+      }
+      syncDataCount--;
+      
+      if (logQueueCount < MAX_LOG_QUEUE) {
+        logQueue[logQueueCount].cabinetPin = pin;
+        logQueueCount++;
+      }
+      
+      openBoxByPin(pin);
+      
+      syncLogsToServer();
+      return;
+    }
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    verifyPickupOnline(code);
+  } else {
+    displayMessage("LOI", "MA KHONG HOP LE!");
+    delay(2000);
+    currentState = STATE_IDLE;
+    displayMainMenu();
+  }
+}
+
+void verifyPickupOnline(String code) {
+  displayMessage("DANG XU LY", "Kiem tra ma tren Server...");
+  
+  HTTPClient http;
+  String url = SERVER_URL + "/api/locker/verify-pickup";
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  StaticJsonDocument<200> doc;
+  doc["code"] = code;
+  doc["macAddress"] = macAddress;
+  String requestBody;
+  serializeJson(doc, requestBody);
+
+  int httpResponseCode = http.POST(requestBody);
+  
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    Serial.println(response);
+    
+    StaticJsonDocument<500> responseDoc;
+    DeserializationError error = deserializeJson(responseDoc, response);
+    
+    if (!error && responseDoc["success"] == true) {
+      int cabinetPin = responseDoc["cabinetPin"] | 0;
+      int boxNumber = responseDoc["boxNumber"] | 0;
+      displayMessage("THANH CONG", "Ma hop le!");
+      
+      if (cabinetPin > 0) {
+        openBoxByPin(cabinetPin);
+      } else if (boxNumber > 0) {
+        openBox(boxNumber);
+      }
+    } else {
+      displayMessage("LOI", "MA KHONG HOP LE!");
+      delay(2000);
+      currentState = STATE_IDLE;
+      displayMainMenu();
+    }
+  } else {
+    displayMessage("LOI KET NOI", "Khong the toi Server");
+    delay(2000);
+    currentState = STATE_IDLE;
+    displayMainMenu();
+  }
+  
+  http.end();
+}
+
+void syncDataFromServer() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  HTTPClient http;
+  String url = SERVER_URL + "/api/sync-data?macAddress=" + macAddress;
+  http.begin(url);
+  
+  int httpResponseCode = http.GET();
+  
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, response);
+    
+    if (!error) {
+      JsonArray arr = doc.as<JsonArray>();
+      syncDataCount = 0;
+      
+      for (JsonObject entry : arr) {
+        if (syncDataCount < MAX_SYNC_ENTRIES) {
+          syncData[syncDataCount].cabinetPin = entry["cabinetPin"];
+          syncData[syncDataCount].otpCode = entry["otpCode"].as<String>();
+          syncDataCount++;
+        }
+      }
+      
+      Serial.print("[SYNC] Received ");
+      Serial.print(syncDataCount);
+      Serial.println(" entries from server");
+    }
+  }
+  
+  http.end();
+}
+
+void syncLogsToServer() {
+  if (WiFi.status() != WL_CONNECTED || logQueueCount == 0) return;
+  
+  for (int i = 0; i < logQueueCount; i++) {
+    HTTPClient http;
+    String url = SERVER_URL + "/api/sync-from-esp";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    
+    StaticJsonDocument<200> doc;
+    doc["macAddress"] = macAddress;
+    doc["cabinetPin"] = logQueue[i].cabinetPin;
+    String requestBody;
+    serializeJson(doc, requestBody);
+    
+    int httpResponseCode = http.POST(requestBody);
+    
+    if (httpResponseCode > 0) {
+      String response = http.getString();
+      StaticJsonDocument<200> responseDoc;
+      deserializeJson(responseDoc, response);
+      
+      if (responseDoc["success"] == true) {
+        Serial.print("[SYNC-UP] Log synced for pin ");
+        Serial.println(logQueue[i].cabinetPin);
+      }
+    }
+    
+    http.end();
+  }
+  
+  logQueueCount = 0;
+}
+
+void handleServerMessage(String payload) {
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+  
+  if (error) {
+    Serial.print("[WS] JSON parse error: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  
+  if (doc.containsKey("cabinetPin")) {
+    int cabinetPin = doc["cabinetPin"];
+    Serial.print("[WS] Open cabinet command, pin: ");
+    Serial.println(cabinetPin);
+    openBoxByPin(cabinetPin);
+  }
+}
+
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      wsConnected = false;
+      Serial.println("[WS] Disconnected!");
+      break;
+      
+    case WStype_CONNECTED:
+      wsConnected = true;
+      Serial.println("[WS] Connected to server!");
+      {
+        String registerMsg = "{\"type\":\"register_device\",\"macAddress\":\"" + macAddress + "\"}";
+        webSocket.sendTXT(registerMsg);
+        Serial.println("[WS] Sent device registration");
+      }
+      syncDataFromServer();
+      syncLogsToServer();
+      break;
+      
+    case WStype_TEXT:
+      {
+        String message = String((char*)payload);
+        Serial.print("[WS] Received: ");
+        Serial.println(message);
+        
+        if (message.indexOf("open_cabinet") >= 0 || message.indexOf("cabinetPin") >= 0) {
+          handleServerMessage(message);
+        }
+        if (message.indexOf("sync_request") >= 0) {
+          syncDataFromServer();
+        }
+      }
+      break;
+      
+    case WStype_PING:
+      break;
+    case WStype_PONG:
+      break;
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -210,7 +447,7 @@ void setup() {
     for(;;); 
   }
   
-  display.setTextColor(SSD1306_WHITE); // FIX: Set text color before drawing anything
+  display.setTextColor(SSD1306_WHITE);
   displayMessage("KHOI DONG", "Dang ket noi WiFi...");
   
   WiFi.begin(ssid, password);
@@ -221,7 +458,18 @@ void setup() {
     attempts++;
   }
   
-  displayMainMenu(); 
+  macAddress = WiFi.macAddress();
+  macAddress.replace(":", "");
+  String formattedMac = "";
+  for (int i = 0; i < macAddress.length(); i++) {
+    formattedMac += macAddress[i];
+    if (i % 2 == 1 && i < macAddress.length() - 1) {
+      formattedMac += ":";
+    }
+  }
+  macAddress = formattedMac;
+  Serial.print("MAC Address: ");
+  Serial.println(macAddress);
 
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
@@ -238,10 +486,21 @@ void setup() {
   delay(500);
   servoBox2.detach();
 
+  if (WiFi.status() == WL_CONNECTED) {
+    webSocket.begin(WS_HOST, WS_PORT, "/socket.io/?EIO=4&transport=websocket");
+    webSocket.onEvent(webSocketEvent);
+    webSocket.setReconnectInterval(5000);
+    
+    syncDataFromServer();
+  }
+
+  displayMainMenu(); 
   Serial.println(F("He thong tu do thong minh da san sang!"));
 }
 
 void loop() {
+  webSocket.loop();
+  
   char customKey = myKeypad.getKey();
   
   if (customKey) {
@@ -263,37 +522,47 @@ void loop() {
 
       case STATE_DELIVERY_INPUT:
         if (customKey >= '0' && customKey <= '9') {
-          if (inputBuffer.length() < 4) { 
+          if (inputBuffer.length() < 6) { 
             inputBuffer += customKey;
             displayInputScreen("MA GIAO HANG:", inputBuffer.length());
           }
         } 
         else if (customKey == '#') {
           currentState = STATE_BOX_OPENING;
-          verifyCode("delivery", inputBuffer);
+          verifyDelivery(inputBuffer);
           inputBuffer = ""; 
         }
         else if (customKey == '*') {
           inputBuffer = "";
           displayInputScreen("MA GIAO HANG:", 0);
         }
+        else if (customKey == 'D') { 
+          currentState = STATE_IDLE;
+          inputBuffer = "";
+          displayMainMenu();
+        }
         break;
 
       case STATE_PICKUP_INPUT:
         if (customKey >= '0' && customKey <= '9') {
-          if (inputBuffer.length() < 4) {
+          if (inputBuffer.length() < 6) { 
             inputBuffer += customKey;
             displayInputScreen("MA NHAN HANG:", inputBuffer.length());
           }
         }
         else if (customKey == '#') {
           currentState = STATE_BOX_OPENING;
-          verifyCode("pickup", inputBuffer);
+          verifyPickup(inputBuffer);
           inputBuffer = "";
         }
         else if (customKey == '*') {
           inputBuffer = "";
           displayInputScreen("MA NHAN HANG:", 0);
+        }
+        else if (customKey == 'D') { 
+          currentState = STATE_IDLE;
+          inputBuffer = "";
+          displayMainMenu();
         }
         break;
         
